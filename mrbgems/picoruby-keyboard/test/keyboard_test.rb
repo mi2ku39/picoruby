@@ -368,7 +368,7 @@ class KeyboardTapModifierTest < Picotest::Test
     @kbd = Keyboard.new([0, 1], [2, 3, 4])
     @kbd.layer(:default) do
       row MT(KC::KC_RSFT, KC::KC_SPACE), MT(KC::KC_LCTL, KC::KC_A), LT(1, KC::KC_B)
-      row KC::KC_C, KC::KC_NO, KC::KC_NO
+      row KC::KC_C, KC::KC_D, KC::KC_NO
     end
     @kbd.layer(:fn) do
       row KC::KC_NO, KC::KC_NO, KC::KC_NO
@@ -429,6 +429,24 @@ class KeyboardTapModifierTest < Picotest::Test
     release(0, 0)
     assert_equal [[0, 0]], @events.map { |e| [e[:keycode], e[:modifier]] }
     assert_equal [[KC::KC_C, 0], [0, 0]], tap(1, 0)
+  end
+
+  def test_combo_key_tap_keeps_a_held_mt_modifier
+    @kbd.add_combo([KC::KC_C, KC::KC_D], KC::KC_E)
+    press(0, 0)
+    tap(0, 1)
+    # C is buffered for the combo and sent as a tap on release.
+    assert_equal [[KC::KC_C, RSFT], [0, RSFT]], tap(1, 0)
+  end
+
+  def test_combo_action_keeps_a_held_mt_modifier
+    @kbd.add_combo([KC::KC_C, KC::KC_D], KC::KC_E)
+    press(0, 0)
+    tap(0, 1)
+    @events.clear
+    press(1, 0)
+    press(1, 1)
+    assert_equal [[KC::KC_E, RSFT], [0, RSFT]], @events.map { |e| [e[:keycode], e[:modifier]] }
   end
 end
 
