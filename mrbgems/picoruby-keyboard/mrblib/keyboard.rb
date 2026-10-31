@@ -253,7 +253,9 @@ class Keyboard
     end
 
     # Combo handling (before normal key processing)
-    # Resolve keycode for combo detection (may use reference layer)
+    # Resolve keycode for combo detection (may use reference layer).
+    # Unlike keycode above, this is resolved again on release, but the
+    # release is matched by position (combo_buffer_has?), not by keycode.
     combo_keycode = resolve_keycode_for_combo(row, col)
 
     if pressed && is_combo_keycode?(combo_keycode)
@@ -697,8 +699,8 @@ class Keyboard
   end
 
   # Modifier bits of all active keys (held modifiers and MT keys in hold).
-  # Sent with every event, including LT/MT taps, so that a tap does not
-  # clear a modifier the host still sees as held.
+  # Sent with every event, including LT/MT taps and combos, so that they
+  # do not clear a modifier the host still sees as held.
   def current_modifier
     modifier = 0
     active_keys = @active_keys
@@ -817,7 +819,7 @@ class Keyboard
       row: 0,
       col: 0,
       keycode: action,
-      modifier: 0,
+      modifier: current_modifier,
       pressed: true
     )
     sleep_ms 5
@@ -825,7 +827,7 @@ class Keyboard
       row: 0,
       col: 0,
       keycode: 0,
-      modifier: 0,
+      modifier: current_modifier,
       pressed: false
     )
   end
@@ -954,7 +956,7 @@ class Keyboard
       row: key_pos[0],
       col: key_pos[1],
       keycode: entry[:keycode], # steep:ignore
-      modifier: 0,
+      modifier: current_modifier,
       pressed: true
     )
     sleep_ms 5
@@ -962,7 +964,7 @@ class Keyboard
       row: key_pos[0],
       col: key_pos[1],
       keycode: 0,
-      modifier: 0,
+      modifier: current_modifier,
       pressed: false
     )
   end
