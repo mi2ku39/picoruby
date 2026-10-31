@@ -191,6 +191,10 @@ class Keyboard
 
   # Entry point for a key event from the matrix or inject_event
   def handle_event(event)
+    # Time of the event. An event held back for an undecided LT/MT key is
+    # processed later, so timing decisions use this instead of the time
+    # of processing.
+    event[:time] = Machine.board_millis
     # @type var key_pos: [Integer, Integer]
     key_pos = [event[:row], event[:col]]
 
@@ -218,13 +222,26 @@ class Keyboard
     row = event[:row]
     col = event[:col]
     pressed = event[:pressed]
+    time = event[:time]
     # @type var key_pos: [Integer, Integer]
     key_pos = [row, col]
+
+    undecided_key = @undecided_key
+    if undecided_key
+      # The tap threshold passed before this event: hold, as
+      # update_tap_hold_keys would have decided in real time. This event
+      # comes after the held back ones.
+      state = @tap_hold_keys[undecided_key]
+      if state.nil? || @tap_threshold_ms <= time - state[:pressed_at]
+        @event_buffer << event
+        decide_hold(undecided_key)
+        return
+      end
+    end
 
     # While an LT/MT key is undecided, hold back other keys' events, so that
     # they are resolved after the decision: after the tap keycode, or on the
     # hold layer / with the hold modifier.
-    undecided_key = @undecided_key
     if undecided_key && undecided_key != key_pos
       # A key pressed and released while the LT/MT key is held makes it hold
       decides_hold = !pressed && buffered_press?(key_pos)
@@ -252,7 +269,7 @@ class Keyboard
     if is_mt?(keycode)
       modifier_index = mt_modifier_index(keycode)
       tap_keycode = mt_tap_keycode(keycode)
-      handle_tap_hold_key(row, col, :modifier, modifier_index, tap_keycode, pressed)
+      handle_tap_hold_key(row, col, :modifier, modifier_index, tap_keycode, pressed, time)
       # MT keys don't generate key events (handled internally)
       return
     elsif is_mo?(keycode)
@@ -263,7 +280,7 @@ class Keyboard
     elsif is_lt?(keycode)
       layer_index = lt_layer(keycode)
       tap_keycode = lt_tap_keycode(keycode)
-      handle_tap_hold_key(row, col, :layer, layer_index, tap_keycode, pressed)
+      handle_tap_hold_key(row, col, :layer, layer_index, tap_keycode, pressed, time)
       # LT keys don't generate key events (handled internally)
       return
     elsif is_tg?(keycode)
@@ -284,7 +301,7 @@ class Keyboard
     combo_keycode = resolve_keycode_for_combo(row, col)
 
     if pressed && is_combo_keycode?(combo_keycode)
-      add_to_combo_buffer(row, col, combo_keycode)
+      add_to_combo_buffer(row, col, combo_keycode, time)
       if combo = check_combos
         execute_combo(combo)
         return
@@ -422,7 +439,8 @@ class Keyboard
   #   - the tap threshold passes while it is held: hold
   # Other keys' events meanwhile wait in @event_buffer (see process_event),
   # so overlapping taps in fast typing stay taps in the typed order.
-  def handle_tap_hold_key(row, col, tap_type, index, tap_keycode, pressed)
+  # time is the time of the event (see handle_event).
+  def handle_tap_hold_key(row, col, tap_type, index, tap_keycode, pressed, time)
     # @type var key_pos: [Integer, Integer]
     key_pos = [row, col]
     tap_hold_keys = @tap_hold_keys
@@ -430,7 +448,7 @@ class Keyboard
 
     if pressed
       if state && state[:state] == :tapped &&
-         Machine.board_millis - state[:released_at] < @repush_threshold_ms
+         time - state[:released_at] < @repush_threshold_ms
         # Double-tap-hold: repeat the tap keycode while held
         state[:state] = :repeating
         @callback&.call(
@@ -447,7 +465,7 @@ class Keyboard
         tap_type: tap_type,
         index: index,
         tap_keycode: tap_keycode,
-        pressed_at: Machine.board_millis,
+        pressed_at: time,
         state: :pressed
       }
       @undecided_key = key_pos
@@ -457,12 +475,13 @@ class Keyboard
     return unless state
     case state[:state]
     when :pressed
-      # Released while undecided: tap. update_tap_hold_keys decides hold
-      # once the threshold passes, so this is within the threshold (+1 scan).
+      # Released while undecided: tap. process_event and
+      # update_tap_hold_keys decide hold once the threshold passes, so this
+      # is within the threshold.
       @undecided_key = nil
       send_tap(row, col, tap_keycode)
       state[:state] = :tapped
-      state[:released_at] = Machine.board_millis
+      state[:released_at] = time
       requeue_event_buffer
       return
     when :holding
@@ -547,13 +566,15 @@ class Keyboard
   def update_tap_hold_keys
     tap_hold_keys = @tap_hold_keys
 
-    # Tap threshold passed while the key is undecided: hold
-    if undecided_key = @undecided_key
+    # Tap threshold passed while the key is undecided: hold. The held back
+    # events can make another LT/MT key undecided, which may be past its
+    # threshold as well.
+    now = Machine.board_millis
+    while undecided_key = @undecided_key
       state = tap_hold_keys[undecided_key]
-      if state.nil? || @tap_threshold_ms <= Machine.board_millis - state[:pressed_at]
-        decide_hold(undecided_key)
-        process_event_queue
-      end
+      break unless state.nil? || @tap_threshold_ms <= now - state[:pressed_at]
+      decide_hold(undecided_key)
+      process_event_queue
     end
 
     keys_to_delete = [] #: Array[[Integer, Integer]]
@@ -709,12 +730,12 @@ class Keyboard
   end
 
   # Add key press to combo buffer
-  def add_to_combo_buffer(row, col, keycode)
+  def add_to_combo_buffer(row, col, keycode, time)
     # @type var key_pos: [Integer, Integer]
     key_pos = [row, col]
     @combo_buffer << {
       key_pos: key_pos,
-      pressed_at: Machine.board_millis,
+      pressed_at: time,
       keycode: keycode
     }
   end
