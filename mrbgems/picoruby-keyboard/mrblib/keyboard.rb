@@ -30,9 +30,10 @@ class Keyboard
     # Tap/hold key management (LT and MT)
     @tap_hold_keys = {}         # {[row, col] => tap_hold_state}
     @tap_threshold_ms = 200     # Tap threshold in milliseconds
-    @tap_release_ms = 10        # Delay before sending deferred tap release (ms)
-    @tap_bounce_ms = 50         # Ignore re-press within this window after tap (ms)
     @repush_threshold_ms = 200  # Repush threshold for double-tap-hold
+    @undecided_key = nil        # LT/MT key not yet decided as tap or hold: [row, col]
+    @event_queue = []           # Key events waiting to be processed
+    @event_buffer = []          # Events held back while @undecided_key is undecided
     @keys_pressed = {}          # Track physically pressed keys: {[row, col] => true}
     @active_keys = {}           # Track active keys with their resolved keycode/modifier: {[row, col] => {keycode:, modifier:}}
     @pressed_keys = {}          # Key resolved at press, reused on release: {[row, col] => [keycode, modifier]}
@@ -188,24 +189,48 @@ class Keyboard
     0xE0 <= keycode && keycode <= 0xE7
   end
 
+  # Entry point for a key event from the matrix or inject_event
   def handle_event(event)
+    # @type var key_pos: [Integer, Integer]
+    key_pos = [event[:row], event[:col]]
+
+    # Track physically pressed keys for safety cleanup
+    if event[:pressed]
+      @keys_pressed[key_pos] = true
+    else
+      @keys_pressed.delete(key_pos)
+    end
+
+    @event_queue << event
+    process_event_queue
+  end
+
+  # Process queued events in order. Deciding an LT/MT key puts the events
+  # held back for it at the head of the queue (requeue_event_buffer).
+  def process_event_queue
+    queue = @event_queue
+    while event = queue.shift
+      process_event(event)
+    end
+  end
+
+  def process_event(event)
     row = event[:row]
     col = event[:col]
     pressed = event[:pressed]
     # @type var key_pos: [Integer, Integer]
     key_pos = [row, col]
 
-    # Track physically pressed keys for safety cleanup
-    if pressed
-      @keys_pressed[key_pos] = true
-    else
-      @keys_pressed.delete(key_pos)
-    end
-
-    # Track other key presses for tap/hold interruption BEFORE resolving keycode
-    # This ensures layers/modifiers are activated immediately when another key is pressed
-    if pressed
-      mark_other_key_pressed
+    # While an LT/MT key is undecided, hold back other keys' events, so that
+    # they are resolved after the decision: after the tap keycode, or on the
+    # hold layer / with the hold modifier.
+    undecided_key = @undecided_key
+    if undecided_key && undecided_key != key_pos
+      # A key pressed and released while the LT/MT key is held makes it hold
+      decides_hold = !pressed && buffered_press?(key_pos)
+      @event_buffer << event
+      decide_hold(undecided_key) if decides_hold
+      return
     end
 
     # Resolve keycode AND modifier from layers on press, and release the
@@ -227,7 +252,7 @@ class Keyboard
     if is_mt?(keycode)
       modifier_index = mt_modifier_index(keycode)
       tap_keycode = mt_tap_keycode(keycode)
-      handle_mt_key(row, col, modifier_index, tap_keycode, pressed)
+      handle_tap_hold_key(row, col, :modifier, modifier_index, tap_keycode, pressed)
       # MT keys don't generate key events (handled internally)
       return
     elsif is_mo?(keycode)
@@ -238,7 +263,7 @@ class Keyboard
     elsif is_lt?(keycode)
       layer_index = lt_layer(keycode)
       tap_keycode = lt_tap_keycode(keycode)
-      handle_lt_key(row, col, layer_index, tap_keycode, pressed)
+      handle_tap_hold_key(row, col, :layer, layer_index, tap_keycode, pressed)
       # LT keys don't generate key events (handled internally)
       return
     elsif is_tg?(keycode)
@@ -386,235 +411,179 @@ class Keyboard
     end
   end
 
-  def handle_mt_key(row, col, modifier_index, tap_keycode, pressed)
+  # LT and MT keys. tap_type is :layer (index: layer index) or :modifier
+  # (index: modifier index).
+  #
+  # A pressed key stays undecided until one of:
+  #   - it is released: tap (the tap keycode is sent)
+  #   - another key is pressed and released while it is held: hold
+  #   - the tap threshold passes while it is held: hold
+  # Other keys' events meanwhile wait in @event_buffer (see process_event),
+  # so overlapping taps in fast typing stay taps in the typed order.
+  def handle_tap_hold_key(row, col, tap_type, index, tap_keycode, pressed)
     # @type var key_pos: [Integer, Integer]
     key_pos = [row, col]
+    tap_hold_keys = @tap_hold_keys
+    state = tap_hold_keys[key_pos]
 
     if pressed
-      if state = @tap_hold_keys[key_pos]
-        # Ignore bounce during tap release cooldown
-        if state[:state] == :tap_releasing
-          return
-        end
-        # Re-press: check if within repush threshold for double-tap-hold
-        if state[:state] == :tapped
-          elapsed = Machine.board_millis - state[:released_at]
-          if @tap_bounce_ms <= elapsed && elapsed < @repush_threshold_ms
-            # Double-tap-hold: start repeating tap keycode
-            state[:state] = :repeating
-            state[:pressed_at] = Machine.board_millis
-            # Send initial press event
-            @callback&.call(
-              row: row,
-              col: col,
-              keycode: tap_keycode,
-              modifier: current_modifier,
-              pressed: true
-            )
-            return
-          else
-            # Within bounce guard or past repush window: ignore
-            return
-          end
-        end
+      if state && state[:state] == :tapped &&
+         Machine.board_millis - state[:released_at] < @repush_threshold_ms
+        # Double-tap-hold: repeat the tap keycode while held
+        state[:state] = :repeating
+        @callback&.call(
+          row: row,
+          col: col,
+          keycode: tap_keycode,
+          modifier: current_modifier,
+          pressed: true
+        )
+        return
       end
 
-      # Normal press
-      @tap_hold_keys[key_pos] = {
-        tap_type: :modifier,
-        modifier_index: modifier_index,
+      tap_hold_keys[key_pos] = {
+        tap_type: tap_type,
+        index: index,
         tap_keycode: tap_keycode,
         pressed_at: Machine.board_millis,
-        state: :pressed,
-        other_key_pressed: false
+        state: :pressed
       }
-    else
-      if state = @tap_hold_keys[key_pos]
-        elapsed = Machine.board_millis - state[:pressed_at]
-
-        case state[:state]
-        when :pressed
-          # Tap action: send press now, defer release to update_tap_hold_keys
-          if elapsed < @tap_threshold_ms && !state[:other_key_pressed]
-            @callback&.call(
-              row: row,
-              col: col,
-              keycode: tap_keycode,
-              modifier: current_modifier,
-              pressed: true
-            )
-            state[:state] = :tap_releasing
-            state[:tap_sent_at] = Machine.board_millis
-            return
-          end
-        when :holding
-          # Deactivate modifier
-          deactivate_modifier(key_pos)
-        when :repeating
-          # Send release event for repeating tap keycode (keycode = 0 for release)
-          @callback&.call(
-            row: row,
-            col: col,
-            keycode: 0,
-            modifier: current_modifier,
-            pressed: false
-          )
-        end
-
-        # Delete from @tap_hold_keys (unless waiting for deferred release or repush)
-        unless state[:state] == :tapped || state[:state] == :tap_releasing
-          @tap_hold_keys.delete(key_pos)
-        end
-      end
+      @undecided_key = key_pos
+      return
     end
+
+    return unless state
+    case state[:state]
+    when :pressed
+      # Released while undecided: tap. update_tap_hold_keys decides hold
+      # once the threshold passes, so this is within the threshold (+1 scan).
+      @undecided_key = nil
+      send_tap(row, col, tap_keycode)
+      state[:state] = :tapped
+      state[:released_at] = Machine.board_millis
+      requeue_event_buffer
+      return
+    when :holding
+      if state[:tap_type] == :layer
+        deactivate_layer(key_pos, state[:index])
+      else
+        deactivate_modifier(key_pos)
+      end
+    when :repeating
+      @callback&.call(
+        row: row,
+        col: col,
+        keycode: 0,
+        modifier: current_modifier,
+        pressed: false
+      )
+    end
+    tap_hold_keys.delete(key_pos)
   end
 
-  def handle_lt_key(row, col, layer_index, tap_keycode, pressed)
-    # @type var key_pos: [Integer, Integer]
-    key_pos = [row, col]
+  # Send the tap keycode as a press and a release. The two events are
+  # emitted back to back: the callback must not drop the second one when
+  # the USB endpoint is still busy with the first (queue the reports).
+  def send_tap(row, col, tap_keycode)
+    @callback&.call(
+      row: row,
+      col: col,
+      keycode: tap_keycode,
+      modifier: current_modifier,
+      pressed: true
+    )
+    @callback&.call(
+      row: row,
+      col: col,
+      keycode: 0,
+      modifier: current_modifier,
+      pressed: false
+    )
+  end
 
-    if pressed
-      if state = @tap_hold_keys[key_pos]
-        # Ignore bounce during tap release cooldown
-        if state[:state] == :tap_releasing
-          return
-        end
-        # Re-press: check if within repush threshold for double-tap-hold
-        if state[:state] == :tapped
-          elapsed = Machine.board_millis - state[:released_at]
-          if @tap_bounce_ms <= elapsed && elapsed < @repush_threshold_ms
-            # Double-tap-hold: start repeating tap keycode
-            state[:state] = :repeating
-            state[:pressed_at] = Machine.board_millis
-            # Send initial press event
-            @callback&.call(
-              row: row,
-              col: col,
-              keycode: tap_keycode,
-              modifier: current_modifier,
-              pressed: true
-            )
-            return
-          else
-            # Within bounce guard or past repush window: ignore
-            return
-          end
-        end
-      end
-
-      # Normal press
-      @tap_hold_keys[key_pos] = {
-        tap_type: :layer,
-        layer_index: layer_index,
-        tap_keycode: tap_keycode,
-        pressed_at: Machine.board_millis,
-        state: :pressed,
-        other_key_pressed: false
-      }
-    else
-      if state = @tap_hold_keys[key_pos]
-        elapsed = Machine.board_millis - state[:pressed_at]
-
-        case state[:state]
-        when :pressed
-          # Tap action: send press now, defer release to update_tap_hold_keys
-          if elapsed < @tap_threshold_ms && !state[:other_key_pressed]
-            @callback&.call(
-              row: row,
-              col: col,
-              keycode: tap_keycode,
-              modifier: current_modifier,
-              pressed: true
-            )
-            state[:state] = :tap_releasing
-            state[:tap_sent_at] = Machine.board_millis
-            return
-          end
-        when :holding
-          # Deactivate layer
-          deactivate_layer(key_pos, layer_index)
-        when :repeating
-          # Send release event for repeating tap keycode (keycode = 0 for release)
-          @callback&.call(
-            row: row,
-            col: col,
-            keycode: 0,
-            modifier: current_modifier,
-            pressed: false
-          )
-        end
-
-        # Delete from @tap_hold_keys (unless waiting for deferred release or repush)
-        unless state[:state] == :tapped || state[:state] == :tap_releasing
-          @tap_hold_keys.delete(key_pos)
-        end
+  # Decide the undecided LT/MT key as hold and requeue the held back events
+  def decide_hold(key_pos)
+    state = @tap_hold_keys[key_pos]
+    @undecided_key = nil
+    if state
+      state[:state] = :holding
+      if state[:tap_type] == :layer
+        activate_layer(key_pos, state[:index])
+      else
+        activate_modifier(key_pos, state[:index])
       end
     end
+    requeue_event_buffer
+  end
+
+  # Move the held back events to the head of the event queue
+  def requeue_event_buffer
+    buffer = @event_buffer
+    queue = @event_queue
+    i = buffer.size - 1
+    while 0 <= i
+      queue.unshift(buffer[i])
+      i -= 1
+    end
+    buffer.clear
+  end
+
+  # Whether a press of key_pos is held back in @event_buffer
+  def buffered_press?(key_pos)
+    buffer = @event_buffer
+    buffer_size = buffer.size
+    i = 0
+    while i < buffer_size
+      event = buffer[i]
+      return true if event[:pressed] && event[:row] == key_pos[0] && event[:col] == key_pos[1]
+      i += 1
+    end
+    false
   end
 
   # Update tap/hold key states (check for timeout and transitions)
   def update_tap_hold_keys
+    tap_hold_keys = @tap_hold_keys
+
+    # Tap threshold passed while the key is undecided: hold
+    if undecided_key = @undecided_key
+      state = tap_hold_keys[undecided_key]
+      if state.nil? || @tap_threshold_ms <= Machine.board_millis - state[:pressed_at]
+        decide_hold(undecided_key)
+        process_event_queue
+      end
+    end
+
     keys_to_delete = [] #: Array[[Integer, Integer]]
 
-    th_keys = @tap_hold_keys.keys
+    th_keys = tap_hold_keys.keys
+    th_size = th_keys.size
     thi = 0
-    while thi < th_keys.size
-      key_pos = th_keys[thi]
-      state = @tap_hold_keys[key_pos]
-      case state[:state]
-      when :pressed
-        elapsed = Machine.board_millis - state[:pressed_at]
-        if @tap_threshold_ms <= elapsed || state[:other_key_pressed]
-          state[:state] = :holding
-          # Activate based on tap_type
-          if state[:tap_type] == :layer
-            activate_layer(key_pos, state[:layer_index])
-          elsif state[:tap_type] == :modifier
-            activate_modifier(key_pos, state[:modifier_index])
-          end
-        end
-
-      when :tap_releasing
-        # Deferred release: send release after enough time for USB to process press
-        elapsed = Machine.board_millis - state[:tap_sent_at]
-        if @tap_release_ms <= elapsed
-          @callback&.call(
-            row: key_pos[0],
-            col: key_pos[1],
-            keycode: 0,
-            modifier: current_modifier,
-            pressed: false
-          )
-          state[:state] = :tapped
-          state[:released_at] = Machine.board_millis
-        end
-
-      when :tapped
-        # Check if repush threshold has expired
-        elapsed = Machine.board_millis - state[:released_at]
-        if @repush_threshold_ms <= elapsed
-          keys_to_delete << key_pos
-        end
+    while thi < th_size
+      key_pos = th_keys[thi] or raise
+      state = tap_hold_keys[key_pos]
+      # Forget a tap once the repush threshold has expired
+      if state && state[:state] == :tapped && @repush_threshold_ms <= Machine.board_millis - state[:released_at]
+        keys_to_delete << key_pos
       end
       thi += 1
     end
 
     # Safety: If no keys are physically pressed, clean up stuck states
-    if @keys_pressed.empty? && !@tap_hold_keys.empty?
-      th_keys2 = @tap_hold_keys.keys
-      thi2 = 0
-      while thi2 < th_keys2.size
-        key_pos = th_keys2[thi2] or raise
-        state = @tap_hold_keys[key_pos]
+    if @keys_pressed.empty? && !tap_hold_keys.empty?
+      thi = 0
+      while thi < th_size
+        key_pos = th_keys[thi] or raise
+        state = tap_hold_keys[key_pos]
         if state
           case state[:state]
-          when :tapped, :tap_releasing
-            # Keep these (will be handled normally by timer above)
+          when :tapped
+            # Keep (handled by the timer above)
           when :holding
             # Properly deactivate before cleanup
             if state[:tap_type] == :layer
-              deactivate_layer(key_pos, state[:layer_index])
-            elsif state[:tap_type] == :modifier
+              deactivate_layer(key_pos, state[:index])
+            else
               deactivate_modifier(key_pos)
             end
             keys_to_delete << key_pos
@@ -629,41 +598,19 @@ class Keyboard
             keys_to_delete << key_pos
           end
         end
-        thi2 += 1
+        thi += 1
       end
     end
 
     # Clean up keys marked for deletion
     kdi = 0
     while kdi < keys_to_delete.size
-      @tap_hold_keys.delete(keys_to_delete[kdi])
+      tap_hold_keys.delete(keys_to_delete[kdi])
       kdi += 1
     end
 
     # Clean up expired combo buffer entries
     clean_expired_combo_buffer
-  end
-
-  # Mark that another key was pressed (for tap/hold interruption)
-  # Immediately activate layer/modifier when another key is pressed
-  def mark_other_key_pressed
-    th_keys = @tap_hold_keys.keys
-    thi = 0
-    while thi < th_keys.size
-      key_pos = th_keys[thi]
-      state = @tap_hold_keys[key_pos]
-      if state[:state] == :pressed
-        state[:other_key_pressed] = true
-        state[:state] = :holding
-        # Activate based on tap_type
-        if state[:tap_type] == :layer
-          activate_layer(key_pos, state[:layer_index])
-        elsif state[:tap_type] == :modifier
-          activate_modifier(key_pos, state[:modifier_index])
-        end
-      end
-      thi += 1
-    end
   end
 
   def activate_layer(key_pos, layer_index)
