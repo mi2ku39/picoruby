@@ -121,7 +121,7 @@ class Keyboard
   # Handle toggle layer key press
   private def handle_tg_key: (Integer layer_index, bool pressed) -> void
   # Handle LT/MT tap/hold key press/release
-  private def handle_tap_hold_key: (Integer row, Integer col, Symbol tap_type, Integer index, Integer tap_keycode, bool pressed) -> void
+  private def handle_tap_hold_key: (Integer row, Integer col, Symbol tap_type, Integer index, Integer tap_keycode, bool pressed, Integer time) -> void
   # Send the tap keycode as a press and a release
   private def send_tap: (Integer row, Integer col, Integer tap_keycode) -> void
   # Decide the undecided LT/MT key as hold
@@ -155,7 +155,7 @@ class Keyboard
   # Check if keycode is part of any combo
   private def is_combo_keycode?: (Integer keycode) -> bool
   # Add key press to combo buffer
-  private def add_to_combo_buffer: (Integer row, Integer col, Integer keycode) -> void
+  private def add_to_combo_buffer: (Integer row, Integer col, Integer keycode, Integer time) -> void
   # Check if any combo matches the current buffer
   private def check_combos: () -> (combo_entry_t | nil)
   # Execute combo action
