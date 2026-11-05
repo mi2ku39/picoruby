@@ -90,6 +90,32 @@ class KeyboardTapHoldDecisionTest < Picotest::Test
     release(0, 0)
     assert_equal [[KC::KC_A, 0], [0, 0], [KC::KC_A, 0], [0, 0]], @events
   end
+
+  def test_repress_after_another_key_is_not_double_tap_hold
+    press(0, 2)    # B (LT): tap
+    release(0, 2)
+    press(1, 1)    # D: ends B's double-tap-hold window
+    release(1, 1)
+    press(0, 2)    # B again, right away: undecided, not repeating B
+    press(1, 0)
+    release(1, 0)  # decides hold: LEFT on the layer
+    release(0, 2)
+    assert_equal [[KC::KC_B, 0], [0, 0], [KC::KC_D, 0], [0, 0],
+                  [KC::KC_LEFT, 0], [0, 0]], @events
+  end
+
+  def test_rolled_key_after_a_tap_ends_double_tap_hold
+    press(0, 2)    # B (LT)
+    press(1, 1)    # D, held back while B is undecided
+    release(0, 2)  # B tap, then D's press is processed after it
+    release(1, 1)
+    press(0, 2)    # B again: undecided, not repeating B
+    press(1, 0)
+    release(1, 0)
+    release(0, 2)
+    assert_equal [[KC::KC_B, 0], [0, 0], [KC::KC_D, 0], [0, 0],
+                  [KC::KC_LEFT, 0], [0, 0]], @events
+  end
 end
 
 # LT and MT keys held together: the key held back for the other one counts

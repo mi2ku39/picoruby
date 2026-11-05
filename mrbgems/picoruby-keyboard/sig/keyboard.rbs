@@ -128,6 +128,8 @@ class Keyboard
   private def decide_hold: ([Integer, Integer] key_pos) -> void
   # Move the held back events to the head of the event queue
   private def requeue_event_buffer: () -> void
+  # Forget the tapped state of LT/MT keys other than key_pos
+  private def forget_tapped_keys: ([Integer, Integer] key_pos) -> void
   # Whether a press of key_pos is held back
   private def buffered_press?: ([Integer, Integer] key_pos) -> bool
   # Type a macro string by sending individual key press/release events
