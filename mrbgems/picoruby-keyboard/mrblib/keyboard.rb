@@ -250,6 +250,12 @@ class Keyboard
       return
     end
 
+    # A press of another key ends the double-tap-hold window of tapped
+    # LT/MT keys: "B, I, B(hold)" must activate B's layer instead of
+    # repeating B. Done here, not in handle_event, so that a press held back
+    # while an LT/MT key was undecided counts after that key's tap.
+    forget_tapped_keys(key_pos) if pressed
+
     # Resolve keycode AND modifier from layers on press, and release the
     # same key on release. Resolving again on release would pick up a key
     # from another layer if the layer changed while the key was held, and
@@ -547,6 +553,23 @@ class Keyboard
       i -= 1
     end
     buffer.clear
+  end
+
+  # Forget the tapped state of LT/MT keys other than key_pos
+  def forget_tapped_keys(key_pos)
+    tap_hold_keys = @tap_hold_keys
+    return if tap_hold_keys.empty?
+    th_keys = tap_hold_keys.keys
+    th_size = th_keys.size
+    thi = 0
+    while thi < th_size
+      th_key = th_keys[thi] or raise
+      state = tap_hold_keys[th_key]
+      if th_key != key_pos && state && state[:state] == :tapped
+        tap_hold_keys.delete(th_key)
+      end
+      thi += 1
+    end
   end
 
   # Whether a press of key_pos is held back in @event_buffer
