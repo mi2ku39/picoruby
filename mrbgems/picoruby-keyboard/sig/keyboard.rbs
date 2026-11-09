@@ -44,6 +44,9 @@ class Keyboard
   @momentary_keys: Hash[[Integer, Integer], Integer]
   @tap_hold_keys: Hash[[Integer, Integer], Hash[Symbol, untyped]]
   @tap_threshold_ms: Integer
+  @undecided_key: [Integer, Integer] | nil
+  @event_queue: Array[Hash[Symbol, untyped]]
+  @event_buffer: Array[Hash[Symbol, untyped]]
   @repush_threshold_ms: Integer
   @keys_pressed: Hash[[Integer, Integer], bool]
   @active_keys: Hash[[Integer, Integer], Hash[Symbol, Integer]]
@@ -103,6 +106,10 @@ class Keyboard
 
   # Handle key event from KeyboardMatrix
   private def handle_event: (Hash[Symbol, untyped] event) -> void
+  # Process queued key events in order
+  private def process_event_queue: () -> void
+  # Process one key event (held back while an LT/MT key is undecided)
+  private def process_event: (Hash[Symbol, untyped] event) -> void
   # Check if keycode is a modifier key
   private def is_modifier_key?: (Integer keycode) -> bool
   # Resolve keycode and modifier from layer stack
@@ -113,18 +120,22 @@ class Keyboard
   private def handle_mo_key: (Integer row, Integer col, Integer layer_index, bool pressed) -> void
   # Handle toggle layer key press
   private def handle_tg_key: (Integer layer_index, bool pressed) -> void
-  # Handle MT tap/hold key press/release
-  private def handle_mt_key: (Integer row, Integer col, Integer modifier_index, Integer tap_keycode, bool pressed) -> void
-  # Handle LT tap/hold key press/release
-  private def handle_lt_key: (Integer row, Integer col, Integer layer_index, Integer tap_keycode, bool pressed) -> void
+  # Handle LT/MT tap/hold key press/release
+  private def handle_tap_hold_key: (Integer row, Integer col, Symbol tap_type, Integer index, Integer tap_keycode, bool pressed, Integer time) -> void
+  # Send the tap keycode as a press and a release
+  private def send_tap: (Integer row, Integer col, Integer tap_keycode) -> void
+  # Decide the undecided LT/MT key as hold
+  private def decide_hold: ([Integer, Integer] key_pos) -> void
+  # Move the held back events to the head of the event queue
+  private def requeue_event_buffer: () -> void
+  # Whether a press of key_pos is held back
+  private def buffered_press?: ([Integer, Integer] key_pos) -> bool
   # Type a macro string by sending individual key press/release events
   private def handle_mc_key: (Integer macro_index) -> void
   # Convert an ASCII character to [keycode, modifier] for USB HID
   private def ascii_to_hid: (String char) -> ([Integer, Integer] | nil)
   # Update tap/hold key states
   private def update_tap_hold_keys: () -> void
-  # Mark that another key was pressed
-  private def mark_other_key_pressed: () -> void
   # Activate a momentary layer
   private def activate_layer: ([Integer, Integer] key_pos, Integer layer_index) -> void
   # Deactivate a momentary layer
@@ -144,7 +155,7 @@ class Keyboard
   # Check if keycode is part of any combo
   private def is_combo_keycode?: (Integer keycode) -> bool
   # Add key press to combo buffer
-  private def add_to_combo_buffer: (Integer row, Integer col, Integer keycode) -> void
+  private def add_to_combo_buffer: (Integer row, Integer col, Integer keycode, Integer time) -> void
   # Check if any combo matches the current buffer
   private def check_combos: () -> (combo_entry_t | nil)
   # Execute combo action

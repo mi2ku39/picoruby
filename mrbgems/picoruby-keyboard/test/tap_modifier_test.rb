@@ -17,8 +17,7 @@ class KeyboardTapModifierTest < Picotest::Test
       row KC::KC_NO, KC::KC_NO, KC::KC_NO
       row KC::KC_NO, KC::KC_NO, KC::KC_NO
     end
-    # Send the deferred tap release and forget the tapped state at once.
-    @kbd.instance_variable_set(:@tap_release_ms, 0)
+    # Forget the tapped state at once (no double-tap-hold).
     @kbd.instance_variable_set(:@repush_threshold_ms, 0)
     # Keep a slow runner from turning a tap into a hold.
     @kbd.instance_variable_set(:@tap_threshold_ms, 10_000)
@@ -43,7 +42,6 @@ class KeyboardTapModifierTest < Picotest::Test
     @events.clear
     press(row, col)
     release(row, col)
-    tick  # deferred tap release
     tick  # tapped state expires
     @events.map { |e| [e[:keycode], e[:modifier]] }
   end

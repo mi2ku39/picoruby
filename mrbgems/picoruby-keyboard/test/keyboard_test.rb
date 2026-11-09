@@ -322,15 +322,16 @@ class KeyboardResolveTest < Picotest::Test
     assert_raise(ArgumentError) { @kbd.combo_reference_layer = :none }
   end
 
-  def test_mark_other_key_pressed_promotes_a_pressed_tap_hold
+  def test_decide_hold_activates_an_undecided_tap_hold
     @kbd.instance_variable_get(:@tap_hold_keys)[[1, 2]] = {
-      tap_type: :layer, layer_index: 1, tap_keycode: KC::KC_SPACE,
-      pressed_at: 0, state: :pressed, other_key_pressed: false
+      tap_type: :layer, index: 1, tap_keycode: KC::KC_SPACE,
+      pressed_at: 0, state: :pressed
     }
-    @kbd.send(:mark_other_key_pressed)
+    @kbd.instance_variable_set(:@undecided_key, [1, 2])
+    @kbd.send(:decide_hold, [1, 2])
     state = @kbd.instance_variable_get(:@tap_hold_keys)[[1, 2]]
     assert_equal :holding, state[:state]
-    assert state[:other_key_pressed]
+    assert_nil @kbd.instance_variable_get(:@undecided_key)
     assert_equal [KC::KC_1, 0], resolve(0, 0)
   end
 
